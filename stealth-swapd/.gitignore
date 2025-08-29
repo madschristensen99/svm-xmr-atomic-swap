@@ -1,0 +1,14 @@
+/target/
+Carg.lock
+*.swp
+*.swo
+*~
+.env
+.env.local
+config.yaml
+swap.db*
+*.key
+*.json
+/secrets/
+logs/
+*.log

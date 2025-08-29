@@ -1,0 +1,44 @@
+# Stealth-Swap Backend Configuration
+# Copy this file to config.yaml and adjust as needed
+
+solana:
+  rpc_url: "https://api.mainnet-beta.solana.com"
+  keypair_path: "/secrets/bob.json"
+  usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+  commitment: "confirmed"
+
+monero:
+  wallet_rpc_url: "http://127.0.0.1:18083"
+  wallet_file: "bob_swap"
+  password_env: MONERO_WALLET_PASSWORD
+  daemon_url: null
+  daemon_username: null
+  daemon_password: null
+
+quoting:
+  min_usdc: 100_000_000    # 100 USDC (6 decimals)
+  max_usdc: 10_000_000_000  # 10,000 USDC
+  spread_bps: 50           # 0.5% spread
+  expiry_minutes: 30
+
+relayer:
+  enabled: true
+  fee_bps: 10              # 0.1% fee
+  max_gas_lamports: 30_000
+  retry_attempts: 3
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+server:
+  bind_address: "0.0.0.0:3000"
+  timeout_seconds: 30
+  max_connections: 100
+
+database:
+  path: "./data/stealth-swap.db"
+  backup_path: "./data/backup"
+  max_connections: 10
+  checkpoint_interval: 300  # seconds

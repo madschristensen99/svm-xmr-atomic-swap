@@ -1,0 +1,170 @@
+specification.txt
+=================
+
+Stealth-Swap Backend – Rust Implementation
+------------------------------------------
+
+Version: 1.0  
+Date: 2025-08-28  
+Scope: Headless daemon that acts as **Bob (liquidity maker)** and optional **Relayer** for the Solana-XMR atomic swap protocol.
+
+----------------------------------------------------------------
+1. Purpose
+----------------------------------------------------------------
+- Provide a single binary (`stealth-swapd`) that  
+  – keeps an always-on Monero wallet and Solana RPC connection  
+  – quotes, accepts, and executes swaps in both directions  
+  – optionally relays Solana transactions for end-users (fee recovery)  
+  – exposes a minimal HTTP+JSON API for the front-end and operator
+
+----------------------------------------------------------------
+2. External Interfaces
+----------------------------------------------------------------
+2.1 RPC / REST (Tokio + Axum)
+--------------------------------
+POST /v1/quote
+  Body: QuoteRequest { direction, usdc_amount, xmr_amount }
+  → QuoteResponse { quote_id, expiry, usdc_amount, xmr_amount, secret_hash, monero_sub_address, solana_address }
+
+POST /v1/swap/accept
+  Body: AcceptRequest { quote_id, swap_id, direction, usdc_amount, xmr_amount, secret_hash, counterparty_pubkey, expiry }
+  → 204 Accepted
+
+GET  /v1/swap/:swap_id
+  → SwapStatus { state, txids, expiry, failure_reason }
+
+GET  /health
+  → 200 OK { solana_connected, monero_connected, last_block_height }
+
+2.2 Metrics (Prometheus)
+------------------------
+- swaps_total{direction,state}
+- swaps_duration_seconds{direction,state}
+- monero_wallet_balance_xmr
+- solana_wallet_balance_usdc
+- relayer_fees_earned_usdc
+
+----------------------------------------------------------------
+3. Internal Architecture
+----------------------------------------------------------------
+             ┌----------------------┐
+             │   Config / Args      │
+             └---------┬------------┘
+                       │
+ ┌---------------┬-----┴-----┬---------------┐
+ │ Solana Client │           │ Monero Client │
+ │  (anchor)     │           │ (monero-rs)   │
+ └-------┬-------┘           └------┬--------┘
+         │                         │
+         │     ┌-------------------┴------------------┐
+         │     │            Swap Engine               │
+         │     │  • state machine per swap            │
+         │     │  • timers for expiry                 │
+         │     │  • adaptor-sig crypto                │
+         │     └-------------------┬------------------┘
+         │                         │
+ ┌-------┴---------┐   ┌----------┴----------┐
+ │ Quote Manager   │   │ Relayer Worker Pool │
+ └-----------------┘   └---------------------┘
+
+3.1 State Machine (one per swap)
+--------------------------------
+enum SwapState {
+    Quoted,
+    LockedUsdc,
+    LockedXmr,
+    Redeemed,
+    Refunded,
+    Failed,
+}
+
+Transitions triggered by:
+- Solana program events (logs, confirmed tx)
+- Monero wallet notifications
+- Wall-clock expiry
+
+3.2 Adaptor Signature
+---------------------
+- Ed25519 adaptor signatures using `curve25519-dalek`  
+- Monero-side key images verified with `monero-rs`  
+- Swap engine keeps the adaptor secret encrypted at rest (age format)
+
+----------------------------------------------------------------
+4. Configuration File (YAML)
+----------------------------------------------------------------
+solana:
+  rpc_url: "https://api.mainnet-beta.solana.com"
+  keypair_path: "/secrets/bob.json"
+  usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+monero:
+  wallet_rpc_url: "http://127.0.0.1:18083"
+  wallet_file: "bob_swap"
+  password_env: MONERO_WALLET_PASSWORD
+
+quoting:
+  min_usdc: 100_000_000   # 100 USDC
+  max_usdc: 10_000_000_000
+  spread_bps: 50
+
+relayer:
+  enabled: true
+  fee_bps: 10
+  max_gas_lamports: 30_000
+
+logging:
+  level: "info"
+  format: "json"
+
+----------------------------------------------------------------
+5. Command-Line Interface
+----------------------------------------------------------------
+stealth-swapd --config /etc/stealth-swap/config.yaml
+
+Environment variables
+STEALTH_SWAP_CONFIG   path to config file (default ./config.yaml)
+MONERO_WALLET_PASSWORD
+RUST_LOG              per-module log levels
+
+----------------------------------------------------------------
+6. Security Requirements
+----------------------------------------------------------------
+- Private keys never leave memory unencrypted; use `secrecy` crate.  
+- All external RPC calls rate-limited and retried with exponential backoff.  
+- Swap state persisted to SQLite with WAL + encryption via `sqlx + sqlcipher`.  
+- Secrets at rest (`monero password`, adaptor secrets) encrypted with age.  
+- Container image: distroless-static, non-root UID 1000.  
+- CI pipeline runs cargo-audit, cargo-deny, and cargo-geiger.
+
+----------------------------------------------------------------
+7. Error Handling & Alerts
+----------------------------------------------------------------
+- Any transition to `Failed` emits an event to a configured webhook.  
+- Prometheus alert rules provided in `alerts.yml`.  
+- Panics/segfaults trigger systemd restart; logs streamed to Loki.
+
+----------------------------------------------------------------
+8. Build & Release
+----------------------------------------------------------------
+cargo build --release --target x86_64-unknown-linux-musl  
+Produces `stealth-swapd` (≈ 12 MB static binary).  
+GitHub Actions workflow builds, signs with Sigstore, pushes to GHCR.
+
+----------------------------------------------------------------
+9. Development Quick-Start
+----------------------------------------------------------------
+$ git clone git@github.com:org/stealth-swap-backend.git
+$ cd stealth-swap-backend
+$ cp config.example.yaml config.yaml
+$ docker compose up --build
+$ cargo test --workspace
+
+----------------------------------------------------------------
+10. Future Work (not in v1)
+----------------------------------------------------------------
+- gRPC service for high-frequency makers  
+- Encrypted order book (V2) via zkFHE coprocessor  
+- Automatic liquidity rebalancing across CEX/DEX
+
+----------------------------------------------------------------
+End of specification
