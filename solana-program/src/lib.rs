@@ -5,26 +5,99 @@ use anchor_spl::associated_token::AssociatedToken;
 
 declare_id!("G1BVSiFojnXFaPG1WUgJAcYaB7aGKLKWtSqhMreKgA82");
 
-// Helper function for secret verification
+// Helper function for Schnorr adaptor-signature verification using Solana syscalls only
 fn verify_adaptor_signature(
     sig: &[u8; 64],
     parity: u8,
     curve_point: &[u8; 32],
     expected_hash: &[u8; 32],
 ) -> Result<[u8; 32]> {
-    require!(parity <= 1, ErrorCode::InvalidAdaptorSig);
+    use anchor_lang::solana_program::{hash, secp256k1_recover};
     
-    // For production, this would verify the actual discrete log
-    // For now, we simulate by deriving secret and checking hash
-    let mut secret = [0u8; 32];
+    require!(parity <= 1, ErrorCode::InvalidAdaptorSig);
+    require!(!sig.iter().all(|&b| b == 0), ErrorCode::InvalidAdaptorSig);
+    require!(!curve_point.iter().all(|&b| b == 0), ErrorCode::InvalidAdaptorSig);
+    require!(!expected_hash.iter().all(|&b| b == 0), ErrorCode::InvalidAdaptorSig);
+    
+    let r = &sig[0..32];
+    let s = &sig[32..64];
+    
+    let challenge_e = {
+        let mut input = Vec::with_capacity(96);
+        input.extend_from_slice(r);
+        input.extend_from_slice(curve_point);
+        input.extend_from_slice(expected_hash);
+        hash::hash(&input).to_bytes()
+    };
+    
+    let recovery_id = if parity == 0 { 0 } else { 1 };
+    
+    let recovered_pub = match secp256k1_recover::secp256k1_recover(
+        expected_hash,
+        recovery_id,
+        sig,
+    ) {
+        Ok(bytes) => bytes,
+        Err(_) => return err!(ErrorCode::InvalidAdaptorSig),
+    };
+    
+    let recovered_bytes = recovered_pub.to_bytes();
+    
+    let mut constant_time_match = true;
     for i in 0..32 {
-        secret[i] = sig[i] ^ curve_point[i] ^ (parity as u8);
+        let a = recovered_bytes[i];
+        let b = curve_point[i];
+        constant_time_match &= (a == b);
     }
     
-    let computed_hash = anchor_lang::solana_program::hash::hash(&[&secret[..], &[0x01]].concat()).to_bytes();
-    require!(computed_hash == *expected_hash, ErrorCode::InvalidPreimage);
+    if !constant_time_match {
+        return err!(ErrorCode::InvalidAdaptorSig);
+    }
     
-    Ok(secret)
+    const N: [u8; 32] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
+        0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+    ];
+    
+    // Discrete log extraction: t ≡ (s - e) mod n where n is secp256k1 scalar order
+    let mut t = [0u8; 32];
+    let mut borrow = 0u8;
+    
+    // Single 32-byte constant-time modular subtraction: t = (s - e) mod N
+    for i in (0..32).rev() {
+        let a = s[i] as u16 + 256 - borrow as u16;
+        let b = challenge_e[i] as u16;
+        let mut diff = a - b;
+        
+        let n_val = N[i] as u16;
+        if diff >= n_val {
+            diff -= n_val;
+        }
+        
+        borrow = if diff < 256 { 1 } else { 0 };
+        t[i] = (diff & 0xff) as u8;
+    }
+    
+    // Handle final borrow - add N to result
+    if borrow != 0 {
+        let mut carry = 0u8;
+        for i in (0..32).rev() {
+            let a = N[i] as u16 + carry as u16;
+            let b = t[i] as u16;
+            let sum = a + b;
+            
+            t[i] = (sum & 0xff) as u8;
+            carry = (sum >> 8) as u8;
+        }
+    }
+    
+    if t.iter().all(|&b| b == 0) {
+        return err!(ErrorCode::InvalidAdaptorSig);
+    }
+    
+    Ok(t)
 }
 
 #[program]
